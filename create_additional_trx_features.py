@@ -1,193 +1,362 @@
 import pandas as pd
 import numpy as np
-import sqlite3
-import matplotlib.pyplot as plt
+import utils as u
 
-def create_final_transcript(transcript, sql_connect):
-	# If offer was received and viewed, label = 1; otherwise 0
-	query = """
-		SELECT DISTINCT a.person, a.offer_id, a.time as received_time, b.time as viewed_time
-		, CASE WHEN b.person IS NULL THEN 0 ELSE 1 END as label
-		FROM (SELECT person, offer_id, time 
-		FROM transcript
-		WHERE event = 'offer received') a
-		LEFT JOIN (SELECT person, offer_id, time
-		FROM transcript
-		WHERE event = 'offer viewed') b
-		    ON a.person = b.person
-		    AND a.offer_id = b.offer_id
-		    AND a.time <= b.time
-		"""
+def create_final_transcript():
+    """
+    Create final transcript with target lable
+    indicating whether an offer was received and viewed or not viewed
 
-	pd.read_sql_query(query,sql_connect).to_sql('transcript_rec_view', sql_connect, if_exists='replace')
+    OUTPUT:
+    transcript_final: dataframe
+    """
 
-	# For customers receiving and viewing the same offers, use the min view time as the only view time for that offer
-	query = """
-		SELECT a.person, a.offer_id, a.received_time, a.viewed_time-a.received_time as duration_view, label
-		FROM (SELECT person, offer_id, received_time, min(viewed_time) as viewed_time, max(label) as label
-		FROM transcript_rec_view
-		GROUP BY person, offer_id, received_time) a
-		"""
-	
-	transcript_final = pd.read_sql_query(query,sql_connect)
+    # If offer was received and viewed, label = 1; otherwise 0
+    query = """
+        SELECT DISTINCT a.person, a.offer_id, a.time as received_time, b.time as viewed_time
+        , CASE WHEN b.person IS NULL THEN 0 ELSE 1 END as label
+        FROM (SELECT person, offer_id, time 
+            FROM transcript
+            WHERE event = 'offer received') a
+        LEFT JOIN (SELECT person, offer_id, time
+            FROM transcript
+            WHERE event = 'offer viewed') b
+                ON a.person = b.person
+                AND a.offer_id = b.offer_id
+                AND a.time <= b.time
+        """
+    transcript_rec_view = u.read_dataframe_from_sql(query)
 
-	assert sum(transcript['event'] == 'offer received') == transcript_final.shape[0]\
-	, "Incorrect dimension - the number of 'offer received' in original transcript should equal to transcript_final"
+    u.save_dataframe_to_sql(transcript_rec_view, 'transcript_rec_view')
 
-	transcript_final.to_sql('transcript_final', sql_connect, if_exists='replace')
+    # For customers receiving and viewing the same offers,
+    # use the min view time as the only view time for that offer
+    query = """
+        SELECT a.person, a.offer_id, a.received_time, a.viewed_time-a.received_time as duration_view, label
+        FROM (SELECT person, offer_id, received_time, min(viewed_time) as viewed_time, max(label) as label
+            FROM transcript_rec_view
+        GROUP BY person, offer_id, received_time) a
+        """
 
-	return transcript_final
+    transcript_final = u.read_dataframe_from_sql(query)
 
-def splt_training_testing(transcript_final, sql_connect):
-	# To prevent data leakage when creating features based on transcript
-	# if the time is smaller than a threshold, make it training data and larger than a threshold as testing data
-	# training : testing should roughly be 3:1
+    u.save_dataframe_to_sql(transcript_final, 'transcript_final')
 
-	transcript_quantile = transcript_final.groupby('person')['received_time'].quantile(0.75).reset_index()
-	transcript_quantile.to_sql('transcript_quantile', sql_connect, if_exists='replace')
+    return transcript_final
 
-	query = """
-		SELECT a.*, CASE WHEN a.received_time <= b.received_time THEN 1 ELSE 0 END as training_label
-		FROM transcript_final a
-		LEFT JOIN transcript_quantile b
-		        ON a.person = b.person    
-		"""
+def split_training_testing():
+    """
+    Split transcript_final to training and testing based on received_time.
+    The training data contain historical data till a received_time.
+    The testing data should contain all data after the received_time.
 
-	assert pd.read_sql_query(query,sql_connect).shape[0]==transcript_final.shape[0] \
-	, "Wrong data dimension after joining with quantile"
+    OUTPUT:
+    transcript_training: dataframe
+    transcript_testing: dataframe
+    """
 
-	transcript_final = pd.read_sql_query(query,sql_connect)
+    transcript_final = create_final_transcript()
 
-	assert transcript_final['training_label'].sum()/ transcript_final.shape[0] > 0.7 \
-	, "Training data accounts for less than 70% of the total data"
+    # To prevent data leakage when creating features based on transcript
+    # if the time is smaller than a threshold, make it training data
+    # and larger than a threshold as testing data
+    # training : testing should roughly be 3:1
+    transcript_quantile = transcript_final.groupby('person')['received_time']\
+    .quantile(0.75).reset_index()
 
-	transcript_training = transcript_final[transcript_final['training_label']==1]
-	transcript_testing = transcript_final[transcript_final['training_label']==0]
+    query = """
+        SELECT a.*, CASE WHEN a.received_time <= b.received_time THEN 1 ELSE 0 END as training_label
+        FROM transcript_final a
+        LEFT JOIN transcript_quantile b
+                ON a.person = b.person    
+        """
 
-	assert len(transcript_training['person'].unique()) >= len(transcript_testing['person'].unique()) \
-	, "Training data include fewer customer than in the testin data"
+    assert u.read_dataframe_from_sql(query).shape[0]==transcript_final.shape[0] \
+    , "Wrong data dimension after joining with quantile"
 
-	transcript_final.to_sql('transcript_final', sql_connect, if_exists='replace')
-	transcript_training.to_sql('transcript_training', sql_connect, if_exists='replace')
-	transcript_testing.to_sql('transcript_testing', sql_connect, if_exists='replace')
+    transcript_final = u.read_dataframe_from_sql(query)
 
-	return transcript_training, transcript_testing
+    assert transcript_final['training_label'].sum()/ transcript_final.shape[0] > 0.7 \
+    , "Training data accounts for less than 70% of the total data"
 
-def create_features_using_groupby(transcript_training, entity_col, feature, avg=True, min=True, max=True):
-    groupby = transcript_training.groupby(entity_col)[feature]
-    
+    # split transcript_final to training and testing
+    transcript_training = transcript_final[transcript_final['training_label']==1]
+    transcript_testing = transcript_final[transcript_final['training_label']==0]
+
+    assert len(transcript_training['person'].unique()) >= len(transcript_testing['person'].unique()) \
+    , "Training data include fewer customer than in the testing data"
+
+    u.save_dataframe_to_sql(transcript_final, 'transcript_final')
+    u.save_dataframe_to_sql(transcript_quantile, 'transcript_quantile')
+    u.save_dataframe_to_sql(transcript_training, 'transcript_training')
+    u.save_dataframe_to_sql(transcript_testing, 'transcript_testing')
+
+    return transcript_training, transcript_testing
+
+def create_features_using_groupby(training, entity, feature, avg=True, minimum=True, maximum=True):
+    """
+    Helper function to create portfolio and profile features based on transcript data
+
+    INPUT:
+    training: dataframe
+    entity: String (i.e. portfolio, profile)
+    feature: String (e.g. duratoin view, amount)
+    avg: Boolean - if True, create average for the feature provided; if False, do not create
+    minimum: Boolean - if True, create minimum for the feature provided; if False, do not create
+    maximum: Boolean - if True, create maxinum for the feature provided; if False, do not create
+
+    OUTPUT:
+    feature_df: dataframe
+    """
+
+    entity_col = 'offer_id' if entity == 'portfolio' else 'person'
+
+    groupby = training.groupby(entity_col)[feature]
+
     features, col_name = [], []
     if avg:
         features.append(groupby.mean())
         col_name.append('avg_'+feature)
-    if min:
+    if minimum:
         features.append(groupby.min())
         col_name.append('min_'+feature)
-    if max:
+    if maximum:
         features.append(groupby.max())
         col_name.append('max_'+feature)
-        
+
     feature_df = pd.concat(features, axis=1)
-    feature_df.columns = col_name
-    
+    feature_df.columns = [col + '_' + entity for col in col_name]
+
     return feature_df
 
-def create_features_offer(portfolio, transcript_training, sql_connect):
-	portfolio_duration = create_features_using_groupby(transcript_training, 'offer_id', 'duration_view')
-	portfolio_view_rate = create_features_using_groupby(transcript_training, 'offer_id', 'label', min=False, max=False)
-	portfolio_view_rate.columns=['view_rate']
-	portfolio_feat = pd.concat([portfolio_view_rate, portfolio_duration], axis=1)
-	assert portfolio_feat.shape[0] == portfolio.shape[0], "rows do not match with original data (portfolio)"
-	portfolio = portfolio.join(portfolio_feat)
+def create_features_offer(portfolio, transcript_training):
+    """
+    Create offer (portfolio) features based on transcript data
+    Use training data only to prevent data leakage
 
-	# remove constant and highly correlated features
-	portfolio.drop(columns=['min_duration_view', 'difficulty', 'mobile', 'view_rate', 'avg_duration_view'], inplace=True)
+    INPUT:
+    portfolio: dataframe
+    stranscript_training: dataframe
 
-	portfolio.to_sql('portfolio', sql_connect, if_exists='replace')
+    OUTPUT:
+    portfolio: dataframe
+    """
 
-	return portfolio
+    # create avg/min/max duration view
+    portfolio_duration = create_features_using_groupby(transcript_training, \
+    	'portfolio', 'duration_view')
 
-def create_features_customer(profile, transcript_training, sql_connect):
-	query = """
-		SELECT a.person, min(amount) as min_amount, max(amount) as max_amount, avg(amount) as avg_amount
-		FROM transcript a
-		    JOIN transcript_quantile b
-		        ON a.person = b.person  
-		WHERE a.time <= b.received_time
-		GROUP BY a.person
-		"""
+    # create view rate (average of label)
+    portfolio_view_rate = create_features_using_groupby(transcript_training, \
+    	'portfolio', 'label', minimum=False, maximum=False)
+    portfolio_view_rate.columns=['view_rate_portfolio']
 
-	profile_amount = pd.read_sql_query(query,sql_connect).set_index('person')
+    portfolio_feat = pd.concat([portfolio_view_rate, portfolio_duration], axis=1)
 
-	profile_duration = create_features_using_groupby(transcript_training, 'person', 'duration_view')
+    assert portfolio_feat.shape[0] == portfolio.shape[0], \
+    "rows do not match with original data (portfolio)"
 
-	profile_view_rate = create_features_using_groupby(transcript_training, 'person', 'label', min=False, max=False)
-	profile_view_rate.columns=['view_rate']
+    portfolio = portfolio.join(portfolio_feat)
 
-	profile_trx_rate = (transcript_training.groupby('person').size()*100/(transcript_training.groupby('person')['received_time'].max() - transcript_training.groupby('person')['received_time'].min())).reset_index()
-	profile_trx_rate.columns = ['person', 'avg_trx_cnt']
-	profile_trx_rate.loc[profile_trx_rate['avg_trx_cnt']==np.inf, 'avg_trx_cnt'] = 1
-	profile_trx_rate = profile_trx_rate.set_index('person')
+    # remove constant and highly correlated features
+    portfolio.drop(columns=['min_duration_view_portfolio', 'difficulty', \
+    	'mobile', 'view_rate_portfolio', 'avg_duration_view_portfolio'], inplace=True)
 
-	profile_feat = profile_amount.join(profile_duration).join(profile_view_rate).join(profile_trx_rate)
+    u.save_dataframe_to_sql(portfolio, 'portfolio')
 
-	assert pd.merge(profile, profile_feat, how='left', left_index=True, right_index=True).shape[0] == profile.shape[0], "rows do not match with original data (profile)"
+    return portfolio
 
-	profile = pd.merge(profile, profile_feat, how='left', left_index=True, right_index=True)
+def create_features_customer(profile, transcript_training):
+    """
+    Create customer (profile) features based on transcript data
+    Use training data only to prevent data leakage
 
-	# transform skewed data using log transformation
-	view_amount_features = ['max_duration_view', 'view_rate', 'max_amount', 'min_duration_view', 'min_amount',\
-                       'avg_amount', 'avg_trx_cnt', 'avg_duration_view']
-	profile_transformed = np.log(profile[view_amount_features]+1)
+    INPUT:
+    profile: dataframe
+    transcript_training: dataframe
 
-	profile = pd.concat([profile[['gender', 'age', 'became_member_on', 'income']],profile_transformed], axis=1)
+    OUTPUT:
+    profile: dataframe
+    """
 
-	profile.drop(columns=['income', 'min_amount', 'avg_amount', 'avg_duration_view'], inplace=True)
+    # create avg/min/max amount features. Need to calculate amount features from transcript
+    # because transcript_training only contains transactions for offer received and viewed.
+    # such transactions do not have amount associated
 
-	profile.to_sql('profile', sql_connect, if_exists='replace')
+    query = """
+        SELECT a.person, min(amount) as min_amount, max(amount) as max_amount, avg(amount) as avg_amount
+        FROM transcript a
+            JOIN transcript_quantile b
+                ON a.person = b.person  
+        WHERE a.time <= b.received_time
+        GROUP BY a.person
+        """
 
-	return profile
+    profile_amount = u.read_dataframe_from_sql(query).set_index('person')
 
-def log_transform_transcript(transcript_training, transcript_testing):
-	transcript_training['duration_view'] = np.log(transcript_training['duration_view']+1)
-	transcript_testing['duration_view'] = np.log(transcript_testing['duration_view']+1)
-	return transcript_training, transcript_testing
+    # create avg/min/max amount duration_view
+    profile_duration = create_features_using_groupby(transcript_training\
+    	, 'profile', 'duration_view')
 
-def combine_portfolio_profile_transcript(transcript_training, transcript_testing, portfolio, profile):
-	# combine training and testing
-	transcript_comb = pd.concat([transcript_training, transcript_testing], axis=0)
+    # create view rate (average of label)
+    profile_view_rate = create_features_using_groupby(transcript_training, 'profile', 'label'\
+    	, minimum=False, maximum=False)
+    profile_view_rate.columns=['view_rate_profile']
 
-	trans_port_df = pd.merge(transcript_comb, portfolio, how='inner', left_on='offer_id', right_on='id')
-	trans_port_df.drop(columns=['index'], inplace=True)
-	trans_port_df.rename({'max_duration_view':'max_duration_view_portfolio'}, axis=1, inplace=True)
-	assert trans_port_df.shape[0] == transcript_comb.shape[0], "rows do not match with original data"
+    # create trx rate (count of transactions per person/(max received time - min received time))
+    profile_trx_rate = (transcript_training.groupby('person').size()*100\
+        /(transcript_training.groupby('person')['received_time'].max() \
+            - transcript_training.groupby('person')['received_time'].min())).reset_index()
+    profile_trx_rate.columns = ['person', 'avg_trx_cnt']
+    # set trx rate = 1 if max received time == min received time
+    profile_trx_rate.loc[profile_trx_rate['avg_trx_cnt']==np.inf, 'avg_trx_cnt'] = 1
+    profile_trx_rate = profile_trx_rate.set_index('person')
 
-	trans_port_profile_df = pd.merge(trans_port_df, profile, how='inner', left_on='person', right_on='id')
-	#trans_port_profile_df.drop(columns=['id'], inplace=True)
-	trans_port_profile_df.rename({'max_duration_view':'max_duration_view_profile'}, axis=1, inplace=True)
-	assert trans_port_profile_df.shape[0] == transcript_comb.shape[0], "rows do not match with original data"
+    profile_feat = profile_amount.join(profile_duration)\
+    .join(profile_view_rate).join(profile_trx_rate)
 
-	missing_col = list(trans_port_profile_df.isnull().sum()[trans_port_profile_df.isnull().sum() > 0].index)
+    assert pd.merge(profile, profile_feat, how='left', left_index=True, right_index=True).shape[0] == profile.shape[0]\
+    , "rows do not match with original data (profile)"
 
-	for col in missing_col:
-		if trans_port_profile_df[col].dtypes == 'object':
-			# Using mode to impute the missing categorical values
-			trans_port_profile_df.loc[trans_port_profile_df.loc[:,col].isnull(),col]= \
-			trans_port_profile_df[col].value_counts().sort_values(ascending=False).index[0]
-		else:
-			# Using mean to impute the missing numerical values
-			trans_port_profile_df.loc[trans_port_profile_df.loc[:,col].isnull(),col]=trans_port_profile_df.loc[:,col].mean()
+    profile = pd.merge(profile, profile_feat, how='left', left_index=True, right_index=True)
 
-	return trans_port_profile_df
+    return profile
+
+def log_transform_features_customer(profile):
+    """
+    log transform skewed customer features
+
+    INPUT:
+    profile: dataframe
+
+    OUTPUT:
+    profile: dataframe
+    """
+
+    view_amount_features = ['max_duration_view_profile', 'view_rate_profile', 'max_amount', \
+    'min_duration_view_profile', 'min_amount',\
+    'avg_amount', 'avg_trx_cnt', 'avg_duration_view_profile']
+
+    profile_transformed = np.log(profile[view_amount_features]+1)
+
+    profile = pd.concat([profile[['gender', 'age', 'became_member_on', 'income']]\
+    	,profile_transformed], axis=1)
+
+    profile.drop(columns=['income', 'min_amount', 'avg_amount', 'avg_duration_view_profile']\
+    	, inplace=True)
+
+    u.save_dataframe_to_sql(profile, 'profile')
+
+    return profile
+
+def transform_transcript():
+    """
+    log transform skewed duration view in both training and testing data
+
+    OUTPUT:
+    transcript_training: dataframe
+    transcript_testing: dataframe
+    """
+
+    transcript_training, transcript_testing = split_training_testing()
+
+    # separately transform training and testing to prevent data leakage
+    transcript_training['duration_view'] = np.log(transcript_training['duration_view']+1)
+    transcript_testing['duration_view'] = np.log(transcript_testing['duration_view']+1)
+
+    return transcript_training, transcript_testing
+
+def combine_portfolio_profile_transcript(training, testing, portfolio, profile):
+    """
+    combine transcript, portfolio, and profile
+
+    INPUT:
+    training: dataframe
+    testing: dataframe
+    portfolio: dataframe
+    profile: dataframe
+
+    OUTPUT:
+    combine_df: dataframe
+    """
+
+    # combine training and testing
+    transcript_comb = pd.concat([training, testing], axis=0)
+
+    trans_port_df = pd.merge(transcript_comb, portfolio, \
+    	how='inner', left_on='offer_id', right_on='id')
+
+    trans_port_df.drop(columns=['index'], inplace=True)
+
+    assert trans_port_df.shape[0] == transcript_comb.shape[0]\
+    , "rows do not match with original data"
+
+    combine_df = pd.merge(trans_port_df, profile, how='inner', left_on='person', right_on='id')
+
+    assert combine_df.shape[0] == transcript_comb.shape[0], "rows do not match with original data"
+
+    missing_col = list(combine_df.isnull().sum()[combine_df.isnull().sum() > 0].index)
+
+    for col in missing_col:
+        if combine_df[col].dtypes == 'object':
+            # Using mode to impute the missing categorical values
+            combine_df.loc[combine_df.loc[:,col].isnull(),col]= \
+            combine_df[col].value_counts().sort_values(ascending=False).index[0]
+        else:
+            # Using mean to impute the missing numerical values
+            combine_df.loc[combine_df.loc[:,col].isnull(),col]=combine_df.loc[:,col].mean()
+
+    return combine_df
 
 def transform_feature_combine_df(combine_df):
-	# Change became_member_on to date difference between min became_member_on
-	min_became_member_on = pd.to_datetime(combine_df['became_member_on']).min()
-	combine_df['became_member_on'] = (pd.to_datetime(combine_df['became_member_on']) - min_became_member_on).astype('timedelta64[D]')
+    """
+    transform features (i.e. 'became_member_on', 'offer_type', 'gender') in combine_df
 
-	#OHE for offer_type and gender
-	combine_df = pd.concat([combine_df, pd.get_dummies(combine_df[['offer_type', 'gender']], drop_first=True)], axis=1)
+    INPUT:
+    combine_df: dataframe
 
-	combine_df.drop(columns=['offer_type', 'gender'], inplace=True)
+    OUTPUT:
+    combine_df: dataframe
+    """
 
-	return combine_df
+    # Change became_member_on to date difference between min became_member_on
+    min_became_member_on = pd.to_datetime(combine_df['became_member_on']).min()
+    combine_df['became_member_on'] = (pd.to_datetime(combine_df['became_member_on']) \
+    	- min_became_member_on).astype('timedelta64[D]')
+
+    #OHE for offer_type and gender
+    combine_df = pd.concat([combine_df, pd.get_dummies(combine_df[['offer_type', 'gender']]\
+    	, drop_first=True)], axis=1)
+
+    combine_df.drop(columns=['offer_type', 'gender'], inplace=True)
+
+    return combine_df
+
+def create_combined_df (portfolio, profile):
+    """
+    put all functions together to create combined dataframe combining
+    transcript, portfolio, and profile with clean and transformed features
+
+    INPUT:
+    transcript: dataframe
+    portfolio: dataframe
+    profile: dataframe
+
+    OUTPUT:
+    combine_df: dataframe
+    """
+
+    transcript_training, transcript_testing = transform_transcript()
+
+    portfolio = create_features_offer(portfolio, transcript_training)
+
+    profile = create_features_customer(profile, transcript_training)
+
+    profile = log_transform_features_customer(profile)
+
+    combine_df = combine_portfolio_profile_transcript(transcript_training, \
+    	transcript_testing, portfolio, profile)
+
+    combine_df = transform_feature_combine_df(combine_df)
+
+    return combine_df
