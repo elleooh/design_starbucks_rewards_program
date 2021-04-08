@@ -1,61 +1,87 @@
 import pandas as pd
-import sqlite3
-import json
-import matplotlib.pyplot as plt
-#%matplotlib inline
+import utils as u
 
 def transform_portfolio(portfolio):
-	# email is not included because all portfolios use email as a channel
-	channels_lst = ['web', 'mobile', 'social']
-	channels_df = pd.DataFrame(columns = channels_lst)
-	portfolio = pd.concat([portfolio, channels_df], axis=1)
+    """
+    The original format for portfolio's 'channel' column is [web, email, mobile, social]
+    This function makes each channel as a separate column. 
+    1 or 0 to indicate whether the portfolio is of this channel
 
-	for channel in channels_lst:
-		portfolio[channel] = portfolio['channels'].apply(lambda x: 1 if channel in x else 0)
+    INPUT:
+    portfolio: dataframe
 
-	portfolio.drop(columns=['channels'], inplace=True)
+    OUTPUT:
+    portfolio: dataframe
+    """
 
-	return portfolio
+    # email is not included because all portfolios use email as a channel
+    channels_lst = ['web', 'mobile', 'social']
 
+    for channel in channels_lst:
+        portfolio[channel] = portfolio['channels'].apply(lambda x: 1 if channel in x else 0)
+
+    portfolio.drop(columns=['channels'], inplace=True)
+
+    portfolio = portfolio.set_index('id')
+
+    # save dataframe to database 
+    u.save_dataframe_to_sql(portfolio, 'portfolio')
+
+    return portfolio
 
 def transform_profile(profile):
-	profile['became_member_on'] = pd.to_datetime(profile['became_member_on'], format='%Y%m%d')
+    """
+    Transform profile features - became_member_on, gender, and age
 
-	# Turn gender == 'o' to Unknown
-	profile.loc[profile['gender'] == 'O', 'gender'] = None
+    INPUT:
+    profile: dataframe
 
-	# Turn age > 100 to Unknown
-	profile.loc[profile['age'] > 100, 'age'] = None
+    OUTPUT:
+    profile: dataframe
+    """
 
-	return profile
+    # turn 'became_member_on' to datetime
+    profile['became_member_on'] = pd.to_datetime(profile['became_member_on'], format='%Y%m%d')
+
+    # turn gender == 'o' to Unknown
+    profile.loc[profile['gender'] == 'O', 'gender'] = None
+
+    # turn age > 100 to Unknown
+    profile.loc[profile['age'] > 100, 'age'] = None
+
+    profile = profile.set_index('id')
+
+    # save dataframe to database
+    u.save_dataframe_to_sql(profile, 'profile')
+
+    return profile
 
 def transform_transcript(transcript):
-	# Add 'offer id' and 'amount' columns to the dataframe
-	col = ['offer id', 'amount']
+    """
+    The original format for transcript's 'value' column is
+    {'offer id': '9b98b8c7a33c4b65b9aebfe6a799e6d9', 'amount:' 10}
 
-	for c in col:
-		col_lst = []
-		for v in transcript['value']:
-			try:
-				col_lst.append(v[c])
-			except:
-				col_lst.append(None)
-		transcript[c] = col_lst
+    INPUT:
+    transcript: dataframe
 
-	transcript.drop(columns=['value'], inplace=True)
+    OUTPUT:
+    transcript: dataframe
+    """
 
-	# Turn amount > 50 to Unknown
-	transcript.loc[transcript['amount'] > 50, 'amount'] = None
+    # add 'offer id' and 'amount' columns to the dataframe
+    col_names = ['offer id', 'amount']
 
-	transcript.rename(columns={'offer id': 'offer_id'}, inplace=True)
+    for col in col_names:
+        col_lst = [value[col] if col in value else None for value in transcript['value']]
+        transcript[col] = col_lst
 
-	return transcript
+    # turn amount > 50 to None
+    transcript.loc[transcript['amount'] > 50, 'amount'] = None
 
+    transcript.drop(columns=['value'], inplace=True)
+    transcript.rename(columns={'offer id': 'offer_id'}, inplace=True)
 
+    # save dataframe to database 
+    u.save_dataframe_to_sql(transcript, 'transcript')
 
-
-
-
-
-
-
+    return transcript
