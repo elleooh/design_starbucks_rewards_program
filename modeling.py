@@ -5,9 +5,37 @@ from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegressionCV
 from bayes_opt import BayesianOptimization
 
+def return_normalize_entropy(predicted, target):
+    """
+    Calculate normalized entropy based on predicted results and target
+
+    INPUT:
+    predicted: pandas series of predicted results
+    target: pandas series of target labels
+
+    OUTPUT:
+    normalized entropy (evaluation metric)
+    """
+    
+    try:
+        if len(predicted) != len(target):
+            return 'lengths not equal!'
+    except:
+        target = target.get_label() # to be used in lgb Bayesian optimization
+    
+    N = len(target)
+    p = np.mean(target)
+    
+    numerator = -(1/N)*sum([target[i]*np.log(predicted[i]) + 
+                              (1-target[i])*np.log(1-predicted[i])
+                              for i in range(N)])
+    denominator = -(p*np.log(p)+(1-p)*np.log(1-p))
+    
+    return 'normalized_entropy', numerator/denominator, False
+
 # Hybrid GBDT (LightGBM) & LR model
 def bayes_parameter_opt_lgb(x_train, y_train, init_round=15, opt_round=25, n_folds=5 \
-    , random_seed=0, n_estimators=500):
+    , random_seed=0):
     """
     Apply bayesian optimization for LightGBM
 
@@ -23,7 +51,7 @@ def bayes_parameter_opt_lgb(x_train, y_train, init_round=15, opt_round=25, n_fol
     train_data = lgb.Dataset(data=x_train, label=y_train, free_raw_data=False)
 
     # parameters
-    def lgb_eval(learning_rate, num_leaves, feature_fraction \
+    def lgb_eval(n_estimators, learning_rate, num_leaves, feature_fraction \
         , max_depth , min_split_gain, min_child_weight):
         """
         Run cross validation on a range of hyperparameters
@@ -42,9 +70,10 @@ def bayes_parameter_opt_lgb(x_train, y_train, init_round=15, opt_round=25, n_fol
             "subsample" : 0.8,
             "colsample_bytree" : 0.8,
             "verbosity": -1,
-            "metric" : 'binary_logloss'
+            "metric" : 'normalized_entropy'
         }
 
+        params['n_estimators'] = int(round(n_estimators))
         params['learning_rate'] = max(min(learning_rate, 1), 0)
         params['feature_fraction'] = max(min(feature_fraction, 1), 0)
         params['max_depth'] = int(round(max_depth))
@@ -52,13 +81,14 @@ def bayes_parameter_opt_lgb(x_train, y_train, init_round=15, opt_round=25, n_fol
         params['min_split_gain'] = min_split_gain
         params['min_child_weight'] = min_child_weight
 
-        cv_result = lgb.cv(params, train_data, nfold=n_folds, seed=random_seed \
+        cv_result = lgb.cv(params, train_data, feval=normalize_entropy, nfold=n_folds, seed=random_seed \
             , verbose_eval =200,stratified=False)
 
-        return (-1.0 * np.array(cv_result['binary_logloss-mean'])).max()
+        return (-1.0 * np.array(cv_result['normalized_entropy-mean'])).max()
 
     # range
-    lgb_bo = BayesianOptimization(lgb_eval, {'learning_rate': (0.01, 1.0),
+    lgb_bo = BayesianOptimization(lgb_eval, {'n_estimators': (100,300),
+                                            'learning_rate': (0.01, 1.0),
                                             'feature_fraction': (0.1, 0.9),
                                             'max_depth': (5, 9),
                                             'num_leaves' : (200,300),
@@ -99,7 +129,9 @@ def create_train_gbm_model(training_df, testing_df):
 
     # Create LightGBM model
     gbm = lgb.LGBMRegressor(objective='binary',
+                        metric='normalized_entropy',
                         feature_fraction=round(opt_params['feature_fraction'],2),
+                        n_estimators=int(round(opt_params['n_estimators'])),
                         learning_rate=round(opt_params['learning_rate'],2),
                         max_depth = int(round(opt_params['max_depth'])),
                         min_child_weight=int(round(opt_params['min_child_weight'])),
@@ -110,7 +142,7 @@ def create_train_gbm_model(training_df, testing_df):
     gbm.fit(x_train, y_train,
         eval_set = [(x_train, y_train), (x_valid, y_valid)],
         eval_names = ['train', 'val'],
-        eval_metric = 'binary_logloss',
+        eval_metric = 'normalized_entropy',
         )
 
     model = gbm.booster_
@@ -144,31 +176,6 @@ def add_tree_based_features(model, dataframe, feat):
 
     # Combine original features and one-hot encoding tree-based features
     return pd.concat([dataframe[feat].reset_index(), ohe_df], axis = 1), dataframe.label
-
-def return_normalize_entropy(predicted, target):
-    """
-    Calculate normalized entropy based on predicted results and target
-
-    INPUT:
-    predicted: pandas series of predicted results
-    target: pandas series of target labels
-
-    OUTPUT:
-    normalized entropy (evaluation metric)
-    """
-
-    if len(predicted) != len(target):
-        return 'lengths not equal!'
-
-    sample_size = len(target)
-    prob = np.mean(target)
-
-    numerator = -(1/sample_size)*sum([target[i]*np.log(predicted[i]) + \
-        (1-target[i])*np.log(1-predicted[i]) for i in range(sample_size)])
-
-    denominator = -(prob*np.log(prob)+(1-prob)*np.log(1-prob))
-
-    return numerator/denominator
 
 def train_logistic_regression_tree_features(model, training_df, testing_df):
     """
