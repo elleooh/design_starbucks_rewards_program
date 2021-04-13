@@ -139,11 +139,24 @@ def create_train_gbm_model(training_df, testing_df):
                         num_leaves=int(round(opt_params['num_leaves'])))
 
     # train model
-    gbm.fit(x_train, y_train,
-        eval_set = [(x_train, y_train), (x_valid, y_valid)],
-        eval_names = ['train', 'val'],
-        eval_metric = 'normalized_entropy',
-        )
+    gbm = lgb.LGBMRegressor(objective='binary',
+                        metric='normalized_entropy',
+                        bagging_fraction=0.2,
+                        bagging_freq=1,
+                        min_child_samples=20,
+                        reg_alpha=1,
+                        reg_lambda=1,
+                        boosting="gbdt",
+                        subsample=0.8,
+                        colsample_bytree=0.8,
+                        verbosity=-1,
+                        feature_fraction=round(opt_params['feature_fraction'],2),
+                        n_estimators=int(round(opt_params['n_estimators'])),
+                        learning_rate=round(opt_params['learning_rate'],2),
+                        max_depth = int(round(opt_params['max_depth'])),
+                        min_child_weight=int(round(opt_params['min_child_weight'])),
+                        min_split_gain=round(opt_params['min_split_gain'],3),
+                        num_leaves=int(round(opt_params['num_leaves'])))
 
     model = gbm.booster_
 
