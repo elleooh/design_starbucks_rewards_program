@@ -9,6 +9,7 @@ to predict whether a customer would view a Starbucks App promotion offer.
 2. [Project Motivation](#motivation)
 3. [File Descriptions](#files)
 4. [Results](#results)
+5. [Future Work](#futurework)
 5. [Licensing, Authors, and Acknowledgments](#licensing)
 
 ## Installation <a name="installation"></a>
@@ -76,15 +77,26 @@ Below is the summary of the comparison result.
 
 |Model     | NE (training) | NE (validation) | NE (Testing)    |
 |----------|---------------|-----------------|-----------------|
-|GBDT + LR | 0.11% 		   | 0.11% 			 | **0.31%** 	   |
-|GBDT only | 0.35% 		   | 0.36% 			 | **1.89%** 	   |
+|GBDT + LR | 1.03e-05% 	   | 1.06e-05% 		 | **1.54e-05%**   |
+|GBDT only | 0.31% 		   | 0.32% 			 | **1.12%** 	   |
 |LR only   |45.74% 		   | 45.64% 		 | **83.00%** 	   |
 
 The GBDT-only model achieves a significantly lower Normalized Entropy than the LR-only model. As such, the GBDT-
-only model is remarkably more performant than LR in this specific task. However, even though
-the GBDT-only model already achieves small Normalized Entropy, the hybrid (GBDT + LR) model
-is able to further bring down the Normalized Entropy significantly from 1.89% to 0.31%, an impressive
-relative improvement to the GBDT-only model.
+only model is remarkably more performant than LR in this specific task.
+
+However, even though the GBDT-only model already achieves small Normalized Entropy, the hybrid (GBDT + LR) model generates extremely small testing Normalized Entropy ( 1.54e-05%).
+
+This project arrives at the same conclusion as the Facebook paper: that combining the decision
+tree based model with probabilistic linear classifiers significantly improves the prediction
+accuracy of a model using just the probabilistic linear classifiers alone.
+
+## Future Work <a name="futurework"></a>
+
+Based on the hybrid model’s almost perfect Normalized Entropy result, the hybrid model might
+be too complex for this project. A good model not only should be able to predict results
+accurately but also should maintain a simple structure. Future work might involve applying the
+hybrid model to a larger dataset or other tasks to test if this model can be well extended to a
+broad range of use cases.
 
 ## Licensing, Authors, Acknowledgments <a name="licensing"></a>
 
